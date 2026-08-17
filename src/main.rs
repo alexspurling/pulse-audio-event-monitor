@@ -1,38 +1,19 @@
 //! PulseAudio event monitor — subscribes to all PulseAudio events and prints
 //! each event's index, facility, and type to stdout.
 
+mod listener;
+
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use libpulse_binding as pulse;
-use pulse::context::subscribe::{Facility, InterestMaskSet, Operation};
 use pulse::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
-use pulse::def::Retval;
 use pulse::mainloop::signal::{Event as SignalEvent, MainloopSignals};
 use pulse::mainloop::standard::{IterateResult, Mainloop};
 
-fn facility_name(f: Facility) -> &'static str {
-    match f {
-        Facility::Sink => "sink",
-        Facility::Source => "source",
-        Facility::SinkInput => "sink-input",
-        Facility::SourceOutput => "source-output",
-        Facility::Module => "module",
-        Facility::Client => "client",
-        Facility::SampleCache => "sample-cache",
-        Facility::Server => "server",
-        Facility::Card => "card",
-    }
-}
-
-fn operation_name(o: Operation) -> &'static str {
-    match o {
-        Operation::New => "new",
-        Operation::Changed => "change",
-        Operation::Removed => "remove",
-    }
-}
+use listener::PulseEventListener;
 
 fn main() {
     // ── mainloop ──────────────────────────────────────────────────────
@@ -51,20 +32,29 @@ fn main() {
         .connect(None, ContextFlagSet::NOFLAGS, None)
         .expect("Failed to connect to PulseAudio");
 
+    // ── listener ──────────────────────────────────────────────────────
+    let listener = PulseEventListener::new(Rc::clone(&context));
+
     // ── signal handling (SIGINT) ──────────────────────────────────────
     mainloop
         .borrow_mut()
         .init_signals()
         .expect("Failed to initialise signal subsystem");
 
+    let quit_requested = Rc::new(AtomicBool::new(false));
+
+    // Register the SIGINT handler.  The callback sets an atomic flag
+    // instead of calling mainloop.quit() directly, because the signal
+    // fires synchronously within mainloop.iterate() which already holds
+    // a mutable borrow on the mainloop.
     {
-        let ml = Rc::clone(&mainloop);
+        let q = Rc::clone(&quit_requested);
         let _sigint = SignalEvent::new(libc::SIGINT, move |_sig| {
             eprintln!("\n[SIGINT] shutting down...");
-            ml.borrow_mut().quit(Retval(0));
+            q.store(true, Ordering::SeqCst);
         });
 
-        // ── poll until context is READY, then subscribe ────────────────
+        // ── event loop ────────────────────────────────────────────────
         let mut subscribed = false;
         loop {
             match mainloop.borrow_mut().iterate(false) {
@@ -72,36 +62,17 @@ fn main() {
                 IterateResult::Success(_) => {}
             }
 
+            // Check for SIGINT after each iteration.
+            if quit_requested.load(Ordering::SeqCst) {
+                return;
+            }
+
             let state = context.borrow().get_state();
             match state {
                 ContextState::Ready => {
                     if !subscribed {
                         subscribed = true;
-
-                        // Subscribe to all event types.
-                        // The returned Operation is dropped immediately (matching the C++
-                        // pattern of pa_operation_unref after subscribe).
-                        context
-                            .borrow_mut()
-                            .subscribe(InterestMaskSet::all(), |_success| {});
-
-                        // Set the per-event callback.
-                        context
-                            .borrow_mut()
-                            .set_subscribe_callback(Some(Box::new(
-                                |facility: Option<Facility>,
-                                 operation: Option<Operation>,
-                                 idx: u32| {
-                                    let f = facility
-                                        .map(facility_name)
-                                        .unwrap_or("unknown");
-                                    let o = operation
-                                        .map(operation_name)
-                                        .unwrap_or("unknown");
-                                    println!("[{}] {} idx={}", o, f, idx);
-                                },
-                            )));
-
+                        listener.subscribe();
                         eprintln!("Listening for events... (Ctrl+C to quit)");
                     }
                 }
