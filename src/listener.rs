@@ -1,6 +1,7 @@
 //! PulseAudio event subscription management.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use libpulse_binding as pulse;
@@ -33,6 +34,25 @@ fn operation_name(o: Operation) -> &'static str {
     }
 }
 
+/// Owned snapshot of PulseAudio entities fetched during initialisation.
+///
+/// Each entity type has a map keyed by its PulseAudio index.  The maps are
+/// populated during [`fetch_all`](PulseEventListener::fetch_all) before the
+/// subscription callback is installed, so they represent the complete initial
+/// state.
+pub struct PulseAudioState {
+    /// Cards, indexed by PulseAudio card index.
+    pub cards: HashMap<u32, CardInfo<'static>>,
+}
+
+impl PulseAudioState {
+    fn new() -> Self {
+        Self {
+            cards: HashMap::new(),
+        }
+    }
+}
+
 /// Manages PulseAudio event subscription and callback dispatch.
 ///
 /// On Ready, call [`fetch_all`] with a completion closure.  `fetch_all` fires
@@ -46,6 +66,7 @@ fn operation_name(o: Operation) -> &'static str {
 /// pattern.
 pub struct PulseEventListener {
     context: Rc<RefCell<Context>>,
+    state: RefCell<PulseAudioState>,
     pending: Cell<i32>,
     on_complete: RefCell<Option<Box<dyn FnOnce()>>>,
 }
@@ -58,6 +79,7 @@ impl PulseEventListener {
     pub fn new(context: Rc<RefCell<Context>>) -> Rc<Self> {
         Rc::new(Self {
             context,
+            state: RefCell::new(PulseAudioState::new()),
             pending: Cell::new(0),
             on_complete: RefCell::new(None),
         })
@@ -85,6 +107,8 @@ impl PulseEventListener {
                         "fetch_all: card callback triggered (index={})",
                         card_info.index,
                     );
+                    let owned = card_info.to_owned();
+                    this.state.borrow_mut().cards.insert(owned.index, owned);
                 }
                 ListResult::End => {
                     println!("fetch_all: card list complete (EOL)");
