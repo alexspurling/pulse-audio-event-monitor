@@ -6,7 +6,10 @@ use std::rc::Rc;
 
 use libpulse_binding as pulse;
 use pulse::callbacks::ListResult;
-use pulse::context::introspect::CardInfo;
+use pulse::context::introspect::{
+    CardInfo, ClientInfo, ModuleInfo, SampleInfo, ServerInfo, SinkInfo, SinkInputInfo,
+    SourceInfo, SourceOutputInfo,
+};
 use pulse::context::subscribe::{Facility, InterestMaskSet, Operation};
 use pulse::context::Context;
 
@@ -41,14 +44,29 @@ fn operation_name(o: Operation) -> &'static str {
 /// subscription callback is installed, so they represent the complete initial
 /// state.
 pub struct PulseAudioState {
-    /// Cards, indexed by PulseAudio card index.
     pub cards: HashMap<u32, CardInfo<'static>>,
+    pub sinks: HashMap<u32, SinkInfo<'static>>,
+    pub sources: HashMap<u32, SourceInfo<'static>>,
+    pub sink_inputs: HashMap<u32, SinkInputInfo<'static>>,
+    pub source_outputs: HashMap<u32, SourceOutputInfo<'static>>,
+    pub modules: HashMap<u32, ModuleInfo<'static>>,
+    pub clients: HashMap<u32, ClientInfo<'static>>,
+    pub samples: HashMap<u32, SampleInfo<'static>>,
+    pub server: Option<ServerInfo<'static>>,
 }
 
 impl PulseAudioState {
     fn new() -> Self {
         Self {
             cards: HashMap::new(),
+            sinks: HashMap::new(),
+            sources: HashMap::new(),
+            sink_inputs: HashMap::new(),
+            source_outputs: HashMap::new(),
+            modules: HashMap::new(),
+            clients: HashMap::new(),
+            samples: HashMap::new(),
+            server: None,
         }
     }
 }
@@ -92,9 +110,17 @@ impl PulseEventListener {
     pub fn fetch_all(self: &Rc<Self>, on_complete: impl FnOnce() + 'static) {
         *self.on_complete.borrow_mut() = Some(Box::new(on_complete));
         self.fetch_cards();
+        self.fetch_sinks();
+        self.fetch_sources();
+        self.fetch_sink_inputs();
+        self.fetch_source_outputs();
+        self.fetch_modules();
+        self.fetch_clients();
+        self.fetch_samples();
+        self.fetch_server();
     }
 
-    // ── per-entity fetches ──────────────────────────────────────────
+    // ── per-entity fetches (list-style) ──────────────────────────────
 
     fn fetch_cards(self: &Rc<Self>) {
         self.pending.set(self.pending.get() + 1);
@@ -119,6 +145,199 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
             }
+        });
+    }
+
+    fn fetch_sinks(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_sink_info_list(move |result: ListResult<&SinkInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    println!("fetch_all: sink callback triggered (index={})", info.index);
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().sinks.insert(owned.index, owned);
+                }
+                ListResult::End => {
+                    println!("fetch_all: sink list complete (EOL)");
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch_all: sink list error");
+                    this.signal_eol();
+                }
+            }
+        });
+    }
+
+    fn fetch_sources(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_source_info_list(move |result: ListResult<&SourceInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    println!("fetch_all: source callback triggered (index={})", info.index);
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().sources.insert(owned.index, owned);
+                }
+                ListResult::End => {
+                    println!("fetch_all: source list complete (EOL)");
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch_all: source list error");
+                    this.signal_eol();
+                }
+            }
+        });
+    }
+
+    fn fetch_sink_inputs(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op =
+            introspector.get_sink_input_info_list(move |result: ListResult<&SinkInputInfo>| {
+                match result {
+                    ListResult::Item(info) => {
+                        println!(
+                            "fetch_all: sink-input callback triggered (index={})",
+                            info.index,
+                        );
+                        let owned = info.to_owned();
+                        this.state.borrow_mut().sink_inputs.insert(owned.index, owned);
+                    }
+                    ListResult::End => {
+                        println!("fetch_all: sink-input list complete (EOL)");
+                        this.signal_eol();
+                    }
+                    ListResult::Error => {
+                        eprintln!("fetch_all: sink-input list error");
+                        this.signal_eol();
+                    }
+                }
+            });
+    }
+
+    fn fetch_source_outputs(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_source_output_info_list(
+            move |result: ListResult<&SourceOutputInfo>| {
+                match result {
+                    ListResult::Item(info) => {
+                        println!(
+                            "fetch_all: source-output callback triggered (index={})",
+                            info.index,
+                        );
+                        let owned = info.to_owned();
+                        this.state.borrow_mut().source_outputs.insert(owned.index, owned);
+                    }
+                    ListResult::End => {
+                        println!("fetch_all: source-output list complete (EOL)");
+                        this.signal_eol();
+                    }
+                    ListResult::Error => {
+                        eprintln!("fetch_all: source-output list error");
+                        this.signal_eol();
+                    }
+                }
+            },
+        );
+    }
+
+    fn fetch_modules(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_module_info_list(move |result: ListResult<&ModuleInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    println!(
+                        "fetch_all: module callback triggered (index={})",
+                        info.index,
+                    );
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().modules.insert(owned.index, owned);
+                }
+                ListResult::End => {
+                    println!("fetch_all: module list complete (EOL)");
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch_all: module list error");
+                    this.signal_eol();
+                }
+            }
+        });
+    }
+
+    fn fetch_clients(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_client_info_list(move |result: ListResult<&ClientInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    println!(
+                        "fetch_all: client callback triggered (index={})",
+                        info.index,
+                    );
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().clients.insert(owned.index, owned);
+                }
+                ListResult::End => {
+                    println!("fetch_all: client list complete (EOL)");
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch_all: client list error");
+                    this.signal_eol();
+                }
+            }
+        });
+    }
+
+    fn fetch_samples(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_sample_info_list(move |result: ListResult<&SampleInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    println!(
+                        "fetch_all: sample callback triggered (index={})",
+                        info.index,
+                    );
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().samples.insert(owned.index, owned);
+                }
+                ListResult::End => {
+                    println!("fetch_all: sample list complete (EOL)");
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch_all: sample list error");
+                    this.signal_eol();
+                }
+            }
+        });
+    }
+
+    // ── per-entity fetches (single-value) ───────────────────────────
+
+    fn fetch_server(self: &Rc<Self>) {
+        self.pending.set(self.pending.get() + 1);
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_server_info(move |server_info: &ServerInfo| {
+            println!("fetch_all: server callback triggered");
+            let owned = server_info.to_owned();
+            this.state.borrow_mut().server = Some(owned);
+            this.signal_eol();
         });
     }
 
