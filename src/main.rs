@@ -35,6 +35,9 @@ fn main() {
     // ── listener ──────────────────────────────────────────────────────
     let listener = PulseEventListener::new(Rc::clone(&context));
 
+    // ── flag: has fetch_all been fired? ───────────────────────────────
+    let mut fetch_started = false;
+
     // ── signal handling (SIGINT) ──────────────────────────────────────
     mainloop
         .borrow_mut()
@@ -55,7 +58,6 @@ fn main() {
         });
 
         // ── event loop ────────────────────────────────────────────────
-        let mut subscribed = false;
         loop {
             match mainloop.borrow_mut().iterate(false) {
                 IterateResult::Quit(_) | IterateResult::Err(_) => return,
@@ -70,10 +72,13 @@ fn main() {
             let state = context.borrow().get_state();
             match state {
                 ContextState::Ready => {
-                    if !subscribed {
-                        subscribed = true;
-                        listener.subscribe();
-                        eprintln!("Listening for events... (Ctrl+C to quit)");
+                    if !fetch_started {
+                        fetch_started = true;
+                        let this = Rc::clone(&listener);
+                        listener.fetch_all(move || {
+                            this.subscribe();
+                            eprintln!("Listening for events... (Ctrl+C to quit)");
+                        });
                     }
                 }
                 ContextState::Failed | ContextState::Terminated => {
