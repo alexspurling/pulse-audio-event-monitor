@@ -7,11 +7,13 @@ use std::rc::Rc;
 use libpulse_binding as pulse;
 use pulse::callbacks::ListResult;
 use pulse::context::introspect::{
-    CardInfo, ClientInfo, ModuleInfo, SampleInfo, ServerInfo, SinkInfo, SinkInputInfo,
-    SourceInfo, SourceOutputInfo,
+    CardInfo, CardPortInfo, CardProfileInfo, ClientInfo, ModuleInfo, SampleInfo, ServerInfo,
+    SinkInfo, SinkInputInfo, SinkPortInfo, SourceInfo, SourceOutputInfo, SourcePortInfo,
 };
 use pulse::context::subscribe::{Facility, InterestMaskSet, Operation};
 use pulse::context::Context;
+
+use serde_json::{json, Map, Value};
 
 /// Human-readable name for a PulseAudio subscription facility.
 fn facility_name(f: Facility) -> &'static str {
@@ -68,6 +70,289 @@ impl PulseAudioState {
             samples: HashMap::new(),
             server: None,
         }
+    }
+
+    /// Print the complete state as a JSON object to stdout.
+    pub fn print(&self) {
+        let mut root = Map::new();
+
+        root.insert("cards".into(), map_to_json(&self.cards, card_to_json));
+        root.insert("sinks".into(), map_to_json(&self.sinks, sink_to_json));
+        root.insert("sources".into(), map_to_json(&self.sources, source_to_json));
+        root.insert(
+            "sink-inputs".into(),
+            map_to_json(&self.sink_inputs, sink_input_to_json),
+        );
+        root.insert(
+            "source-outputs".into(),
+            map_to_json(&self.source_outputs, source_output_to_json),
+        );
+        root.insert(
+            "modules".into(),
+            map_to_json(&self.modules, module_to_json),
+        );
+        root.insert(
+            "clients".into(),
+            map_to_json(&self.clients, client_to_json),
+        );
+        root.insert(
+            "samples".into(),
+            map_to_json(&self.samples, sample_to_json),
+        );
+        root.insert("server".into(), server_to_json(self.server.as_ref()));
+
+        let output = serde_json::to_string_pretty(&Value::Object(root))
+            .unwrap_or_else(|_| "{}".to_string());
+        println!("{}", output);
+    }
+}
+
+// ── JSON conversion helpers ──────────────────────────────────────────
+
+/// Convert a HashMap of index→entity into a JSON array of entity objects.
+fn map_to_json<T>(map: &HashMap<u32, T>, to_val: fn(&T) -> Value) -> Value {
+    let mut items: Vec<Value> = map.iter().map(|(_idx, entity)| to_val(entity)).collect();
+    items.sort_by(|a, b| {
+        let ia = a.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let ib = b.get("index").and_then(Value::as_u64).unwrap_or(0);
+        ia.cmp(&ib)
+    });
+    Value::Array(items)
+}
+
+// ── CardInfo ────────────────────────────────────────────────────────
+
+fn card_profile_info_to_json(p: &CardProfileInfo) -> Value {
+    json!({
+        "name": p.name,
+        "description": p.description,
+        "n_sinks": p.n_sinks,
+        "n_sources": p.n_sources,
+        "priority": p.priority,
+        "available": format!("{:?}", p.available),
+    })
+}
+
+fn sink_port_info_to_json(p: &SinkPortInfo) -> Value {
+    json!({
+        "name": p.name,
+        "description": p.description,
+        "priority": p.priority,
+        "available": format!("{:?}", p.available),
+    })
+}
+
+fn card_to_json(card: &CardInfo) -> Value {
+    json!({
+        "index": card.index,
+        "name": card.name,
+        "owner_module": card.owner_module,
+        "driver": card.driver,
+        "proplist": format!("{:?}", card.proplist),
+        "ports": card.ports.iter().map(card_port_info_to_json).collect::<Vec<_>>(),
+        "profiles": card.profiles.iter().map(card_profile_info_to_json).collect::<Vec<_>>(),
+        "active_profile": card.active_profile.as_ref().map(|ap| json!({
+            "name": ap.name,
+            "description": ap.description,
+            "n_sinks": ap.n_sinks,
+            "n_sources": ap.n_sources,
+            "priority": ap.priority,
+            "available": format!("{:?}", ap.available),
+        })),
+    })
+}
+
+// ── SinkInfo ────────────────────────────────────────────────────────
+
+fn sink_to_json(sink: &SinkInfo) -> Value {
+    json!({
+        "index": sink.index,
+        "name": sink.name,
+        "description": sink.description,
+        "sample_spec": {
+            "format": format!("{:?}", sink.sample_spec.format),
+            "rate": sink.sample_spec.rate,
+            "channels": sink.sample_spec.channels,
+        },
+        "channel_map": format!("{:?}", sink.channel_map),
+        "owner_module": sink.owner_module,
+        "volume": sink.volume.to_string(),
+        "mute": sink.mute,
+        "monitor_source": sink.monitor_source,
+        "monitor_source_name": sink.monitor_source_name,
+        "latency": sink.latency.0,
+        "flags": format!("{:?}", sink.flags),
+        "proplist": format!("{:?}", sink.proplist),
+        "ports": sink.ports.iter().map(sink_port_info_to_json).collect::<Vec<_>>(),
+        "active_port": sink.active_port.as_deref().map(sink_port_info_to_json),
+        "n_volume_steps": sink.n_volume_steps,
+        "card": sink.card,
+    })
+}
+
+fn card_port_info_to_json(p: &CardPortInfo) -> Value {
+    json!({
+        "name": p.name,
+        "description": p.description,
+        "direction": format!("{:?}", p.direction),
+        "available": format!("{:?}", p.available),
+        "latency_offset": p.latency_offset,
+    })
+}
+
+// ── SourceInfo ──────────────────────────────────────────────────────
+
+fn source_port_info_to_json(p: &SourcePortInfo) -> Value {
+    json!({
+        "name": p.name,
+        "description": p.description,
+        "priority": p.priority,
+        "available": format!("{:?}", p.available),
+    })
+}
+
+fn source_to_json(source: &SourceInfo) -> Value {
+    json!({
+        "index": source.index,
+        "name": source.name,
+        "description": source.description,
+        "sample_spec": {
+            "format": format!("{:?}", source.sample_spec.format),
+            "rate": source.sample_spec.rate,
+            "channels": source.sample_spec.channels,
+        },
+        "channel_map": format!("{:?}", source.channel_map),
+        "owner_module": source.owner_module,
+        "volume": source.volume.to_string(),
+        "mute": source.mute,
+        "monitor_of_sink": source.monitor_of_sink,
+        "monitor_of_sink_name": source.monitor_of_sink_name,
+        "proplist": format!("{:?}", source.proplist),
+        "ports": source.ports.iter().map(source_port_info_to_json).collect::<Vec<_>>(),
+        "active_port": source.active_port.as_deref().map(source_port_info_to_json),
+        "n_volume_steps": source.n_volume_steps,
+        "card": source.card,
+    })
+}
+
+// ── SinkInputInfo ───────────────────────────────────────────────────
+
+fn sink_input_to_json(si: &SinkInputInfo) -> Value {
+    json!({
+        "index": si.index,
+        "name": si.name,
+        "owner_module": si.owner_module,
+        "client": si.client,
+        "sink": si.sink,
+        "sample_spec": {
+            "format": format!("{:?}", si.sample_spec.format),
+            "rate": si.sample_spec.rate,
+            "channels": si.sample_spec.channels,
+        },
+        "channel_map": format!("{:?}", si.channel_map),
+        "volume": si.volume.to_string(),
+        "buffer_usec": si.buffer_usec.0,
+        "sink_usec": si.sink_usec.0,
+        "resample_method": format!("{:?}", si.resample_method),
+        "mute": si.mute,
+        "proplist": format!("{:?}", si.proplist),
+        "corked": si.corked,
+        "has_volume": si.has_volume,
+        "volume_writable": si.volume_writable,
+        "format": format!("{:?}", si.format),
+    })
+}
+
+// ── SourceOutputInfo ────────────────────────────────────────────────
+
+fn source_output_to_json(so: &SourceOutputInfo) -> Value {
+    json!({
+        "index": so.index,
+        "name": so.name,
+        "owner_module": so.owner_module,
+        "client": so.client,
+        "source": so.source,
+        "sample_spec": {
+            "format": format!("{:?}", so.sample_spec.format),
+            "rate": so.sample_spec.rate,
+            "channels": so.sample_spec.channels,
+        },
+        "channel_map": format!("{:?}", so.channel_map),
+        "buffer_usec": so.buffer_usec.0,
+        "source_usec": so.source_usec.0,
+        "resample_method": format!("{:?}", so.resample_method),
+        "mute": so.mute,
+        "proplist": format!("{:?}", so.proplist),
+        "corked": so.corked,
+        "has_volume": so.has_volume,
+        "volume_writable": so.volume_writable,
+        "format": format!("{:?}", so.format),
+    })
+}
+
+// ── ModuleInfo ──────────────────────────────────────────────────────
+
+fn module_to_json(m: &ModuleInfo) -> Value {
+    json!({
+        "index": m.index,
+        "name": m.name,
+        "argument": m.argument,
+        "n_used": m.n_used,
+    })
+}
+
+// ── ClientInfo ──────────────────────────────────────────────────────
+
+fn client_to_json(c: &ClientInfo) -> Value {
+    json!({
+        "index": c.index,
+        "name": c.name,
+        "owner_module": c.owner_module,
+        "driver": c.driver,
+        "proplist": format!("{:?}", c.proplist),
+    })
+}
+
+// ── SampleInfo ──────────────────────────────────────────────────────
+
+fn sample_to_json(s: &SampleInfo) -> Value {
+    json!({
+        "index": s.index,
+        "name": s.name,
+        "volume": s.volume.to_string(),
+        "sample_spec": {
+            "format": format!("{:?}", s.sample_spec.format),
+            "rate": s.sample_spec.rate,
+            "channels": s.sample_spec.channels,
+        },
+        "channel_map": format!("{:?}", s.channel_map),
+        "duration": s.duration.0,
+        "bytes": s.bytes,
+        "lazy": s.lazy,
+        "filename": s.filename,
+    })
+}
+
+// ── ServerInfo ──────────────────────────────────────────────────────
+
+fn server_to_json(s: Option<&ServerInfo>) -> Value {
+    match s {
+        Some(info) => json!({
+            "user_name": info.user_name,
+            "host_name": info.host_name,
+            "server_version": info.server_version,
+            "server_name": info.server_name,
+            "sample_spec": {
+                "format": format!("{:?}", info.sample_spec.format),
+                "rate": info.sample_spec.rate,
+                "channels": info.sample_spec.channels,
+            },
+            "default_sink_name": info.default_sink_name,
+            "default_source_name": info.default_source_name,
+            "cookie": info.cookie,
+            "channel_map": format!("{:?}", info.channel_map),
+        }),
+        None => Value::Null,
     }
 }
 
@@ -366,6 +651,11 @@ impl PulseEventListener {
         self.context
             .borrow_mut()
             .set_subscribe_callback(Some(Self::make_callback()));
+    }
+
+    /// Print the current state as JSON to stdout.
+    pub fn print_state(&self) {
+        self.state.borrow().print();
     }
 
     /// Factory – produces the boxed event callback.

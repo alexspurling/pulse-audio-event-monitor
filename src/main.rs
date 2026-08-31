@@ -76,6 +76,7 @@ fn main() {
                         fetch_started = true;
                         let this = Rc::clone(&listener);
                         listener.fetch_all(move || {
+                            this.print_state();
                             this.subscribe();
                             eprintln!("Listening for events... (Ctrl+C to quit)");
                         });
