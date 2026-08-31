@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use libpulse_binding as pulse;
+use libpulse_binding::format::Info;
 use pulse::callbacks::ListResult;
 use pulse::context::introspect::{
     CardInfo, CardPortInfo, CardProfileInfo, ClientInfo, ModuleInfo, SampleInfo, ServerInfo,
@@ -76,29 +77,14 @@ impl PulseAudioState {
     pub fn print(&self) {
         let mut root = Map::new();
 
-        root.insert("cards".into(), map_to_json(&self.cards, card_to_json));
+        root.insert("modules".into(), map_to_json(&self.modules, module_to_json));
         root.insert("sinks".into(), map_to_json(&self.sinks, sink_to_json));
         root.insert("sources".into(), map_to_json(&self.sources, source_to_json));
-        root.insert(
-            "sink-inputs".into(),
-            map_to_json(&self.sink_inputs, sink_input_to_json),
-        );
-        root.insert(
-            "source-outputs".into(),
-            map_to_json(&self.source_outputs, source_output_to_json),
-        );
-        root.insert(
-            "modules".into(),
-            map_to_json(&self.modules, module_to_json),
-        );
-        root.insert(
-            "clients".into(),
-            map_to_json(&self.clients, client_to_json),
-        );
-        root.insert(
-            "samples".into(),
-            map_to_json(&self.samples, sample_to_json),
-        );
+        root.insert("sink_inputs".into(), map_to_json(&self.sink_inputs, sink_input_to_json));
+        root.insert("source_outputs".into(), map_to_json(&self.source_outputs, source_output_to_json));
+        root.insert("clients".into(), map_to_json(&self.clients, client_to_json));
+        root.insert("samples".into(), map_to_json(&self.samples, sample_to_json));
+        root.insert("cards".into(), map_to_json(&self.cards, card_to_json));
         root.insert("server".into(), server_to_json(self.server.as_ref()));
 
         let output = serde_json::to_string_pretty(&Value::Object(root))
@@ -118,6 +104,48 @@ fn map_to_json<T>(map: &HashMap<u32, T>, to_val: fn(&T) -> Value) -> Value {
         ia.cmp(&ib)
     });
     Value::Array(items)
+}
+
+/// Convert a PulseAudio Proplist into a JSON object with string values.
+fn proplist_to_json(pl: &pulse::proplist::Proplist) -> Value {
+    let mut map = Map::new();
+    for key in pl.iter() {
+        if let Some(val) = pl.get_str(&key) {
+            map.insert(key, Value::String(val));
+        }
+    }
+    Value::Object(map)
+}
+
+
+/// Convert a channelmap::Position variant name from CamelCase to hyphen-separated lowercase.
+///
+/// `FrontLeftOfCenter` → `"front-left-of-center"`, `Lfe` → `"lfe"`.
+fn channel_position_to_str(pos: &pulse::channelmap::Position) -> String {
+    let name = format!("{:?}", pos);
+    let mut out = String::with_capacity(name.len());
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            out.push('-');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Convert a PulseAudio channel map into a JSON array of hyphen-separated position names.
+fn channel_map_to_json(cm: &pulse::channelmap::Map) -> Value {
+    Value::Array(cm.get().iter().map(|pos| Value::String(channel_position_to_str(pos))).collect())
+}
+
+fn format_to_json(format: &Info) -> Value {
+    Value::String({
+        let enc = format!("{:?}", format.get_encoding()).to_lowercase();
+        let props = format.get_properties().to_string_sep("  ").unwrap_or_default();
+        format!("{}, {}", enc, props)
+    })
 }
 
 // ── CardInfo ────────────────────────────────────────────────────────
@@ -148,7 +176,7 @@ fn card_to_json(card: &CardInfo) -> Value {
         "name": card.name,
         "owner_module": card.owner_module,
         "driver": card.driver,
-        "proplist": format!("{:?}", card.proplist),
+        "properties": proplist_to_json(&card.proplist),
         "ports": card.ports.iter().map(card_port_info_to_json).collect::<Vec<_>>(),
         "profiles": card.profiles.iter().map(card_profile_info_to_json).collect::<Vec<_>>(),
         "active_profile": card.active_profile.as_ref().map(|ap| json!({
@@ -174,15 +202,15 @@ fn sink_to_json(sink: &SinkInfo) -> Value {
             "rate": sink.sample_spec.rate,
             "channels": sink.sample_spec.channels,
         },
-        "channel_map": format!("{:?}", sink.channel_map),
+        "channel_map": channel_map_to_json(&sink.channel_map),
         "owner_module": sink.owner_module,
         "volume": sink.volume.to_string(),
         "mute": sink.mute,
         "monitor_source": sink.monitor_source,
         "monitor_source_name": sink.monitor_source_name,
         "latency": sink.latency.0,
-        "flags": format!("{:?}", sink.flags),
-        "proplist": format!("{:?}", sink.proplist),
+        "flags": sink.flags.iter_names().map(|(name, _)| Value::String(name.to_owned())).collect::<Vec<_>>(),
+        "properties": proplist_to_json(&sink.proplist),
         "ports": sink.ports.iter().map(sink_port_info_to_json).collect::<Vec<_>>(),
         "active_port": sink.active_port.as_deref().map(sink_port_info_to_json),
         "n_volume_steps": sink.n_volume_steps,
@@ -221,13 +249,13 @@ fn source_to_json(source: &SourceInfo) -> Value {
             "rate": source.sample_spec.rate,
             "channels": source.sample_spec.channels,
         },
-        "channel_map": format!("{:?}", source.channel_map),
+        "channel_map": channel_map_to_json(&source.channel_map),
         "owner_module": source.owner_module,
         "volume": source.volume.to_string(),
         "mute": source.mute,
         "monitor_of_sink": source.monitor_of_sink,
         "monitor_of_sink_name": source.monitor_of_sink_name,
-        "proplist": format!("{:?}", source.proplist),
+        "properties": proplist_to_json(&source.proplist),
         "ports": source.ports.iter().map(source_port_info_to_json).collect::<Vec<_>>(),
         "active_port": source.active_port.as_deref().map(source_port_info_to_json),
         "n_volume_steps": source.n_volume_steps,
@@ -249,17 +277,17 @@ fn sink_input_to_json(si: &SinkInputInfo) -> Value {
             "rate": si.sample_spec.rate,
             "channels": si.sample_spec.channels,
         },
-        "channel_map": format!("{:?}", si.channel_map),
+        "channel_map": channel_map_to_json(&si.channel_map),
         "volume": si.volume.to_string(),
         "buffer_usec": si.buffer_usec.0,
         "sink_usec": si.sink_usec.0,
-        "resample_method": format!("{:?}", si.resample_method),
+        "resample_method": si.resample_method.as_deref().map(|s: &str| Value::String(s.to_owned())).unwrap_or(Value::Null),
         "mute": si.mute,
-        "proplist": format!("{:?}", si.proplist),
+        "properties": proplist_to_json(&si.proplist),
         "corked": si.corked,
         "has_volume": si.has_volume,
         "volume_writable": si.volume_writable,
-        "format": format!("{:?}", si.format),
+        "format": format_to_json(&si.format),
     })
 }
 
@@ -277,12 +305,12 @@ fn source_output_to_json(so: &SourceOutputInfo) -> Value {
             "rate": so.sample_spec.rate,
             "channels": so.sample_spec.channels,
         },
-        "channel_map": format!("{:?}", so.channel_map),
+        "channel_map": channel_map_to_json(&so.channel_map),
         "buffer_usec": so.buffer_usec.0,
         "source_usec": so.source_usec.0,
-        "resample_method": format!("{:?}", so.resample_method),
+        "resample_method": so.resample_method.as_deref().map(|s: &str| Value::String(s.to_owned())).unwrap_or(Value::Null),
         "mute": so.mute,
-        "proplist": format!("{:?}", so.proplist),
+        "properties": proplist_to_json(&so.proplist),
         "corked": so.corked,
         "has_volume": so.has_volume,
         "volume_writable": so.volume_writable,
@@ -309,7 +337,7 @@ fn client_to_json(c: &ClientInfo) -> Value {
         "name": c.name,
         "owner_module": c.owner_module,
         "driver": c.driver,
-        "proplist": format!("{:?}", c.proplist),
+        "properties": proplist_to_json(&c.proplist),
     })
 }
 
@@ -325,7 +353,7 @@ fn sample_to_json(s: &SampleInfo) -> Value {
             "rate": s.sample_spec.rate,
             "channels": s.sample_spec.channels,
         },
-        "channel_map": format!("{:?}", s.channel_map),
+        "channel_map": channel_map_to_json(&s.channel_map),
         "duration": s.duration.0,
         "bytes": s.bytes,
         "lazy": s.lazy,
@@ -350,7 +378,7 @@ fn server_to_json(s: Option<&ServerInfo>) -> Value {
             "default_sink_name": info.default_sink_name,
             "default_source_name": info.default_source_name,
             "cookie": info.cookie,
-            "channel_map": format!("{:?}", info.channel_map),
+            "channel_map": channel_map_to_json(&info.channel_map),
         }),
         None => Value::Null,
     }
@@ -360,7 +388,7 @@ fn server_to_json(s: Option<&ServerInfo>) -> Value {
 ///
 /// On Ready, call [`fetch_all`] with a completion closure.  `fetch_all` fires
 /// asynchronous info-list queries for every entity type; each increments an
-/// internal pending counter.  When every query has delivered its EOL marker
+/// internal pending counter.  When every query has delivered its EOL marker,
 /// the pending counter reaches zero and the completion closure runs — at
 /// which point [`subscribe`] is called and the event stream begins.
 ///
@@ -414,15 +442,10 @@ impl PulseEventListener {
         let _op = introspector.get_card_info_list(move |result: ListResult<&CardInfo>| {
             match result {
                 ListResult::Item(card_info) => {
-                    println!(
-                        "fetch_all: card callback triggered (index={})",
-                        card_info.index,
-                    );
                     let owned = card_info.to_owned();
                     this.state.borrow_mut().cards.insert(owned.index, owned);
                 }
                 ListResult::End => {
-                    println!("fetch_all: card list complete (EOL)");
                     this.signal_eol();
                 }
                 ListResult::Error => {
@@ -440,12 +463,10 @@ impl PulseEventListener {
         let _op = introspector.get_sink_info_list(move |result: ListResult<&SinkInfo>| {
             match result {
                 ListResult::Item(info) => {
-                    println!("fetch_all: sink callback triggered (index={})", info.index);
                     let owned = info.to_owned();
                     this.state.borrow_mut().sinks.insert(owned.index, owned);
                 }
                 ListResult::End => {
-                    println!("fetch_all: sink list complete (EOL)");
                     this.signal_eol();
                 }
                 ListResult::Error => {
@@ -463,12 +484,10 @@ impl PulseEventListener {
         let _op = introspector.get_source_info_list(move |result: ListResult<&SourceInfo>| {
             match result {
                 ListResult::Item(info) => {
-                    println!("fetch_all: source callback triggered (index={})", info.index);
                     let owned = info.to_owned();
                     this.state.borrow_mut().sources.insert(owned.index, owned);
                 }
                 ListResult::End => {
-                    println!("fetch_all: source list complete (EOL)");
                     this.signal_eol();
                 }
                 ListResult::Error => {
@@ -487,15 +506,10 @@ impl PulseEventListener {
             introspector.get_sink_input_info_list(move |result: ListResult<&SinkInputInfo>| {
                 match result {
                     ListResult::Item(info) => {
-                        println!(
-                            "fetch_all: sink-input callback triggered (index={})",
-                            info.index,
-                        );
                         let owned = info.to_owned();
                         this.state.borrow_mut().sink_inputs.insert(owned.index, owned);
                     }
                     ListResult::End => {
-                        println!("fetch_all: sink-input list complete (EOL)");
                         this.signal_eol();
                     }
                     ListResult::Error => {
@@ -514,15 +528,10 @@ impl PulseEventListener {
             move |result: ListResult<&SourceOutputInfo>| {
                 match result {
                     ListResult::Item(info) => {
-                        println!(
-                            "fetch_all: source-output callback triggered (index={})",
-                            info.index,
-                        );
                         let owned = info.to_owned();
                         this.state.borrow_mut().source_outputs.insert(owned.index, owned);
                     }
                     ListResult::End => {
-                        println!("fetch_all: source-output list complete (EOL)");
                         this.signal_eol();
                     }
                     ListResult::Error => {
@@ -541,15 +550,10 @@ impl PulseEventListener {
         let _op = introspector.get_module_info_list(move |result: ListResult<&ModuleInfo>| {
             match result {
                 ListResult::Item(info) => {
-                    println!(
-                        "fetch_all: module callback triggered (index={})",
-                        info.index,
-                    );
                     let owned = info.to_owned();
                     this.state.borrow_mut().modules.insert(owned.index, owned);
                 }
                 ListResult::End => {
-                    println!("fetch_all: module list complete (EOL)");
                     this.signal_eol();
                 }
                 ListResult::Error => {
@@ -567,15 +571,10 @@ impl PulseEventListener {
         let _op = introspector.get_client_info_list(move |result: ListResult<&ClientInfo>| {
             match result {
                 ListResult::Item(info) => {
-                    println!(
-                        "fetch_all: client callback triggered (index={})",
-                        info.index,
-                    );
                     let owned = info.to_owned();
                     this.state.borrow_mut().clients.insert(owned.index, owned);
                 }
                 ListResult::End => {
-                    println!("fetch_all: client list complete (EOL)");
                     this.signal_eol();
                 }
                 ListResult::Error => {
@@ -593,15 +592,10 @@ impl PulseEventListener {
         let _op = introspector.get_sample_info_list(move |result: ListResult<&SampleInfo>| {
             match result {
                 ListResult::Item(info) => {
-                    println!(
-                        "fetch_all: sample callback triggered (index={})",
-                        info.index,
-                    );
                     let owned = info.to_owned();
                     this.state.borrow_mut().samples.insert(owned.index, owned);
                 }
                 ListResult::End => {
-                    println!("fetch_all: sample list complete (EOL)");
                     this.signal_eol();
                 }
                 ListResult::Error => {
@@ -619,7 +613,6 @@ impl PulseEventListener {
         let this = Rc::clone(self);
         let introspector = self.context.borrow().introspect();
         let _op = introspector.get_server_info(move |server_info: &ServerInfo| {
-            println!("fetch_all: server callback triggered");
             let owned = server_info.to_owned();
             this.state.borrow_mut().server = Some(owned);
             this.signal_eol();
