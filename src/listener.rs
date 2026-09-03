@@ -172,12 +172,11 @@ fn format_to_json(format: &Info) -> Value {
 
 fn card_profile_info_to_json(p: &CardProfileInfo) -> Value {
     json!({
-        "name": p.name,
         "description": p.description,
-        "n_sinks": p.n_sinks,
-        "n_sources": p.n_sources,
+        "sinks": p.n_sinks,
+        "sources": p.n_sources,
         "priority": p.priority,
-        "available": format!("{:?}", p.available),
+        "available": p.available,
     })
 }
 
@@ -200,19 +199,12 @@ fn card_to_json(card: &CardInfo) -> Value {
     json!({
         "index": card.index,
         "name": card.name,
-        "owner_module": card.owner_module,
         "driver": card.driver,
+        "owner_module": card.owner_module,
         "properties": proplist_to_json(&card.proplist),
-        "ports": card.ports.iter().map(card_port_info_to_json).collect::<Vec<_>>(),
-        "profiles": card.profiles.iter().map(card_profile_info_to_json).collect::<Vec<_>>(),
-        "active_profile": card.active_profile.as_ref().map(|ap| json!({
-            "name": ap.name,
-            "description": ap.description,
-            "n_sinks": ap.n_sinks,
-            "n_sources": ap.n_sources,
-            "priority": ap.priority,
-            "available": format!("{:?}", ap.available),
-        })),
+        "profiles": card.profiles.iter().map(|p| (p.name.clone().unwrap_or_default().into_owned(), card_profile_info_to_json(p))).collect::<serde_json::Map<_, _>>(),
+        "active_profile": card.active_profile.as_ref().and_then(|ap| ap.name.as_deref()).map(|s| Value::String(s.to_owned())),
+        "ports": card.ports.iter().map(|p| (p.name.clone().unwrap_or_default().into_owned(), card_port_info_to_json(p))).collect::<serde_json::Map<_, _>>(),
     })
 }
 
@@ -254,18 +246,25 @@ fn sink_to_json(sink: &SinkInfo) -> Value {
         "ports": sink.ports.iter().map(sink_port_info_to_json).collect::<Vec<_>>(),
         "active_port": sink.active_port.as_deref().and_then(|p| p.name.as_deref()).map(|s| Value::String(s.to_owned())),
         "formats": sink.formats.iter().map(|f| Value::String(format!("{:?}", f.get_encoding()).to_lowercase())).collect::<Vec<_>>(),
-        "n_volume_steps": sink.n_volume_steps,
+        "volume_steps": sink.n_volume_steps,
         "card": sink.card,
     })
 }
 
 fn card_port_info_to_json(p: &CardPortInfo) -> Value {
     json!({
-        "name": p.name,
         "description": p.description,
-        "direction": format!("{:?}", p.direction),
-        "available": format!("{:?}", p.available),
-        "latency_offset": p.latency_offset,
+        "type": format!("{:?}", p.r#type),
+        "priority": p.priority,
+        "latency_offset": format!("{} usec", p.latency_offset),
+        "availability_group": p.availability_group.as_deref().unwrap_or(""),
+        "availability": match p.available {
+            pulse::def::PortAvailable::Yes => "available",
+            pulse::def::PortAvailable::No => "not available",
+            _ => "unknown",
+        },
+        "properties": proplist_to_json(&p.proplist),
+        "profiles": p.profiles.iter().map(|pr| pr.name.clone().map(|n| Value::String(n.into_owned())).unwrap_or(Value::Null)).collect::<Vec<_>>(),
     })
 }
 
@@ -333,22 +332,21 @@ fn source_to_json(source: &SourceInfo) -> Value {
 fn sink_input_to_json(si: &SinkInputInfo) -> Value {
     json!({
         "index": si.index,
-        "name": si.name,
+        "driver": si.driver,
         "owner_module": si.owner_module,
-        "client": si.client,
+        "client": si.client.map(|c| Value::String(c.to_string())).unwrap_or(Value::Null),
         "sink": si.sink,
         "sample_specification": si.sample_spec.print(),
         "channel_map": channel_map_to_json(&si.channel_map),
-        "volume": volume_to_json(&si.volume, &si.channel_map),
-        "buffer_usec": si.buffer_usec.0,
-        "sink_usec": si.sink_usec.0,
-        "resample_method": si.resample_method.as_deref().map(|s: &str| Value::String(s.to_owned())).unwrap_or(Value::Null),
-        "mute": si.mute,
-        "properties": proplist_to_json(&si.proplist),
-        "corked": si.corked,
-        "has_volume": si.has_volume,
-        "volume_writable": si.volume_writable,
         "format": format_to_json(&si.format),
+        "corked": si.corked,
+        "mute": si.mute,
+        "volume": volume_to_json(&si.volume, &si.channel_map),
+        "balance": (si.volume.get_balance(&si.channel_map) as f64 * 100.0).round() / 100.0,
+        "buffer_latency_usec": si.buffer_usec.0 as f64,
+        "sink_latency_usec": si.sink_usec.0 as f64,
+        "resample_method": si.resample_method.as_deref().map(|s: &str| Value::String(s.to_owned())).unwrap_or(Value::Null),
+        "properties": proplist_to_json(&si.proplist),
     })
 }
 
@@ -388,9 +386,8 @@ fn module_to_json(m: &ModuleInfo) -> Value {
 fn client_to_json(c: &ClientInfo) -> Value {
     json!({
         "index": c.index,
-        "name": c.name,
-        "owner_module": c.owner_module,
         "driver": c.driver,
+        "owner_module": c.owner_module,
         "properties": proplist_to_json(&c.proplist),
     })
 }
