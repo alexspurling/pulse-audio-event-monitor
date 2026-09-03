@@ -332,18 +332,15 @@ fn source_output_to_json(so: &SourceOutputInfo) -> Value {
     })
 }
 
-// ── ModuleInfo ──────────────────────────────────────────────────────
-
 fn module_to_json(m: &ModuleInfo) -> Value {
     json!({
+        "index": m.index,
         "name": m.name,
         "argument": m.argument.as_deref().unwrap_or(""),
         "usage_counter": m.n_used.map_or(Value::String("n/a".into()), Value::from),
         "properties": proplist_to_json(&m.proplist),
     })
 }
-
-// ── ClientInfo ──────────────────────────────────────────────────────
 
 fn client_to_json(c: &ClientInfo) -> Value {
     json!({
