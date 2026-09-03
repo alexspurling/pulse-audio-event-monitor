@@ -4,8 +4,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use libpulse_binding as pulse;
+use libpulse_binding::def::SinkState;
 use libpulse_binding::format::Info;
+use libpulse_binding::volume::ChannelVolumes;
+
+use libpulse_binding as pulse;
 use pulse::callbacks::ListResult;
 use pulse::context::introspect::{
     CardInfo, CardPortInfo, CardProfileInfo, ClientInfo, ModuleInfo, SampleInfo, ServerInfo,
@@ -95,18 +98,7 @@ impl PulseAudioState {
 
 // ── JSON conversion helpers ──────────────────────────────────────────
 
-/// Convert a HashMap of index→entity into a JSON array of entity objects.
-fn map_to_json<T>(map: &HashMap<u32, T>, to_val: fn(&T) -> Value) -> Value {
-    let mut items: Vec<Value> = map.iter().map(|(_idx, entity)| to_val(entity)).collect();
-    items.sort_by(|a, b| {
-        let ia = a.get("index").and_then(Value::as_u64).unwrap_or(0);
-        let ib = b.get("index").and_then(Value::as_u64).unwrap_or(0);
-        ia.cmp(&ib)
-    });
-    Value::Array(items)
-}
-
-/// Convert a PulseAudio Proplist into a JSON object with string values.
+/// Convert a Proplist into a JSON object with string values.
 fn proplist_to_json(pl: &pulse::proplist::Proplist) -> Value {
     let mut map = Map::new();
     for key in pl.iter() {
@@ -116,7 +108,6 @@ fn proplist_to_json(pl: &pulse::proplist::Proplist) -> Value {
     }
     Value::Object(map)
 }
-
 
 /// Convert a channelmap::Position variant name from CamelCase to hyphen-separated lowercase.
 ///
@@ -140,6 +131,33 @@ fn channel_map_to_json(cm: &pulse::channelmap::Map) -> Value {
     Value::Array(cm.get().iter().map(|pos| Value::String(channel_position_to_str(pos))).collect())
 }
 
+/// Convert a HashMap of index→entity into a JSON array of entity objects (sorted by index).
+fn map_to_json<T>(map: &HashMap<u32, T>, to_val: fn(&T) -> Value) -> Value {
+    let mut items: Vec<Value> = map.iter().map(|(_idx, entity)| to_val(entity)).collect();
+    items.sort_by(|a, b| {
+        let ia = a.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let ib = b.get("index").and_then(Value::as_u64).unwrap_or(0);
+        ia.cmp(&ib)
+    });
+    Value::Array(items)
+}
+
+/// Convert channel volumes paired with a channel map into a JSON object keyed by position name.
+fn volume_to_json(volumes: &ChannelVolumes, map: &pulse::channelmap::Map) -> Value {
+    let pos_names: Vec<String> = map.get().iter().map(|p| channel_position_to_str(p)).collect();
+    let vol_slice: &[pulse::volume::Volume] = std::borrow::Borrow::borrow(volumes);
+    let mut obj = Map::new();
+    for (i, vol) in vol_slice.iter().enumerate() {
+        let key = pos_names.get(i).map_or_else(|| format!("channel-{}", i), |s| s.clone());
+        let mut entry = Map::new();
+        entry.insert("value".into(), Value::from(vol.0));
+        entry.insert("value_percent".into(), Value::String(vol.print().trim().to_owned()));
+        entry.insert("db".into(), Value::String(vol.print_db()));
+        obj.insert(key, Value::Object(entry));
+    }
+    Value::Object(obj)
+}
+
 fn format_to_json(format: &Info) -> Value {
     Value::String({
         let enc = format!("{:?}", format.get_encoding()).to_lowercase();
@@ -147,6 +165,8 @@ fn format_to_json(format: &Info) -> Value {
         format!("{}, {}", enc, props)
     })
 }
+
+// ── CardInfo ────────────────────────────────────────────────────────
 
 // ── CardInfo ────────────────────────────────────────────────────────
 
@@ -190,22 +210,28 @@ fn card_to_json(card: &CardInfo) -> Value {
     })
 }
 
-// ── SinkInfo ────────────────────────────────────────────────────────
+/// Convert a SinkState to a lowercase JSON string.
+fn sink_state_to_json(state: &SinkState) -> Value {
+    Value::String(match state {
+        SinkState::Invalid => "INVALID",
+        SinkState::Running => "RUNNING",
+        SinkState::Idle => "IDLE",
+        SinkState::Suspended => "SUSPENDED",
+    }.to_owned())
+}
 
 fn sink_to_json(sink: &SinkInfo) -> Value {
     json!({
         "index": sink.index,
+        "state": sink_state_to_json(&sink.state),
         "name": sink.name,
         "description": sink.description,
-        "sample_spec": {
-            "format": format!("{:?}", sink.sample_spec.format),
-            "rate": sink.sample_spec.rate,
-            "channels": sink.sample_spec.channels,
-        },
+        "driver": sink.driver,
+        "sample_specification": sink.sample_spec.print(),
         "channel_map": channel_map_to_json(&sink.channel_map),
         "owner_module": sink.owner_module,
-        "volume": sink.volume.to_string(),
         "mute": sink.mute,
+        "volume": volume_to_json(&sink.volume, &sink.channel_map),
         "monitor_source": sink.monitor_source,
         "monitor_source_name": sink.monitor_source_name,
         "latency": sink.latency.0,
@@ -244,14 +270,10 @@ fn source_to_json(source: &SourceInfo) -> Value {
         "index": source.index,
         "name": source.name,
         "description": source.description,
-        "sample_spec": {
-            "format": format!("{:?}", source.sample_spec.format),
-            "rate": source.sample_spec.rate,
-            "channels": source.sample_spec.channels,
-        },
+        "sample_specification": &source.sample_spec.print(),
         "channel_map": channel_map_to_json(&source.channel_map),
         "owner_module": source.owner_module,
-        "volume": source.volume.to_string(),
+        "volume": volume_to_json(&source.volume, &source.channel_map),
         "mute": source.mute,
         "monitor_of_sink": source.monitor_of_sink,
         "monitor_of_sink_name": source.monitor_of_sink_name,
@@ -272,13 +294,9 @@ fn sink_input_to_json(si: &SinkInputInfo) -> Value {
         "owner_module": si.owner_module,
         "client": si.client,
         "sink": si.sink,
-        "sample_spec": {
-            "format": format!("{:?}", si.sample_spec.format),
-            "rate": si.sample_spec.rate,
-            "channels": si.sample_spec.channels,
-        },
+        "sample_specification": si.sample_spec.print(),
         "channel_map": channel_map_to_json(&si.channel_map),
-        "volume": si.volume.to_string(),
+        "volume": volume_to_json(&si.volume, &si.channel_map),
         "buffer_usec": si.buffer_usec.0,
         "sink_usec": si.sink_usec.0,
         "resample_method": si.resample_method.as_deref().map(|s: &str| Value::String(s.to_owned())).unwrap_or(Value::Null),
@@ -300,11 +318,7 @@ fn source_output_to_json(so: &SourceOutputInfo) -> Value {
         "owner_module": so.owner_module,
         "client": so.client,
         "source": so.source,
-        "sample_spec": {
-            "format": format!("{:?}", so.sample_spec.format),
-            "rate": so.sample_spec.rate,
-            "channels": so.sample_spec.channels,
-        },
+        "sample_specification": so.sample_spec.print(),
         "channel_map": channel_map_to_json(&so.channel_map),
         "buffer_usec": so.buffer_usec.0,
         "source_usec": so.source_usec.0,
@@ -314,7 +328,7 @@ fn source_output_to_json(so: &SourceOutputInfo) -> Value {
         "corked": so.corked,
         "has_volume": so.has_volume,
         "volume_writable": so.volume_writable,
-        "format": format!("{:?}", so.format),
+        "format": format_to_json(&so.format),
     })
 }
 
@@ -322,10 +336,10 @@ fn source_output_to_json(so: &SourceOutputInfo) -> Value {
 
 fn module_to_json(m: &ModuleInfo) -> Value {
     json!({
-        "index": m.index,
         "name": m.name,
-        "argument": m.argument,
-        "n_used": m.n_used,
+        "argument": m.argument.as_deref().unwrap_or(""),
+        "usage_counter": m.n_used.map_or(Value::String("n/a".into()), Value::from),
+        "properties": proplist_to_json(&m.proplist),
     })
 }
 
@@ -347,12 +361,8 @@ fn sample_to_json(s: &SampleInfo) -> Value {
     json!({
         "index": s.index,
         "name": s.name,
-        "volume": s.volume.to_string(),
-        "sample_spec": {
-            "format": format!("{:?}", s.sample_spec.format),
-            "rate": s.sample_spec.rate,
-            "channels": s.sample_spec.channels,
-        },
+        "volume": volume_to_json(&s.volume, &s.channel_map),
+        "sample_specification": s.sample_spec.print(),
         "channel_map": channel_map_to_json(&s.channel_map),
         "duration": s.duration.0,
         "bytes": s.bytes,
@@ -370,11 +380,7 @@ fn server_to_json(s: Option<&ServerInfo>) -> Value {
             "host_name": info.host_name,
             "server_version": info.server_version,
             "server_name": info.server_name,
-            "sample_spec": {
-                "format": format!("{:?}", info.sample_spec.format),
-                "rate": info.sample_spec.rate,
-                "channels": info.sample_spec.channels,
-            },
+            "sample_specification": info.sample_spec.print(),
             "default_sink_name": info.default_sink_name,
             "default_source_name": info.default_source_name,
             "cookie": info.cookie,
