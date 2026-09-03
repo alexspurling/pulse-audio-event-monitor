@@ -126,9 +126,9 @@ fn channel_position_to_str(pos: &pulse::channelmap::Position) -> String {
     out
 }
 
-/// Convert a PulseAudio channel map into a JSON array of hyphen-separated position names.
+/// Convert a PulseAudio channel map into a JSON comma-separated string of hyphen-separated position names.
 fn channel_map_to_json(cm: &pulse::channelmap::Map) -> Value {
-    Value::Array(cm.get().iter().map(|pos| Value::String(channel_position_to_str(pos))).collect())
+    Value::String(cm.get().iter().map(channel_position_to_str).collect::<Vec<_>>().join(","))
 }
 
 /// Convert a HashMap of index→entity into a JSON array of entity objects (sorted by index).
@@ -185,8 +185,14 @@ fn sink_port_info_to_json(p: &SinkPortInfo) -> Value {
     json!({
         "name": p.name,
         "description": p.description,
+        "type": format!("{:?}", p.r#type),
         "priority": p.priority,
-        "available": format!("{:?}", p.available),
+        "availability_group": p.availability_group.as_deref().unwrap_or(""),
+        "availability": match p.available {
+            pulse::def::PortAvailable::Yes => "available",
+            pulse::def::PortAvailable::No => "unavailable",
+            _ => "unknown",
+        },
     })
 }
 
@@ -232,13 +238,22 @@ fn sink_to_json(sink: &SinkInfo) -> Value {
         "owner_module": sink.owner_module,
         "mute": sink.mute,
         "volume": volume_to_json(&sink.volume, &sink.channel_map),
-        "monitor_source": sink.monitor_source,
-        "monitor_source_name": sink.monitor_source_name,
-        "latency": sink.latency.0,
+        "balance": (sink.volume.get_balance(&sink.channel_map) as f64 * 100.0).round() / 100.0,
+        "base_volume": {
+            "value": sink.base_volume.0,
+            "value_percent": Value::String(sink.base_volume.print().trim().to_owned()),
+            "db": Value::String(sink.base_volume.print_db()),
+        },
+        "monitor_source": sink.monitor_source_name,
+        "latency": {
+            "actual": sink.latency.0 as f64,
+            "configured": sink.configured_latency.0 as f64,
+        },
         "flags": sink.flags.iter_names().map(|(name, _)| Value::String(name.to_owned())).collect::<Vec<_>>(),
         "properties": proplist_to_json(&sink.proplist),
         "ports": sink.ports.iter().map(sink_port_info_to_json).collect::<Vec<_>>(),
-        "active_port": sink.active_port.as_deref().map(sink_port_info_to_json),
+        "active_port": sink.active_port.as_deref().and_then(|p| p.name.as_deref()).map(|s| Value::String(s.to_owned())),
+        "formats": sink.formats.iter().map(|f| Value::String(format!("{:?}", f.get_encoding()).to_lowercase())).collect::<Vec<_>>(),
         "n_volume_steps": sink.n_volume_steps,
         "card": sink.card,
     })
