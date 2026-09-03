@@ -275,26 +275,54 @@ fn source_port_info_to_json(p: &SourcePortInfo) -> Value {
     json!({
         "name": p.name,
         "description": p.description,
+        "type": format!("{:?}", p.r#type),
         "priority": p.priority,
-        "available": format!("{:?}", p.available),
+        "availability_group": p.availability_group.as_deref().unwrap_or(""),
+        "availability": match p.available {
+            pulse::def::PortAvailable::Yes => "available",
+            pulse::def::PortAvailable::No => "unavailable",
+            _ => "unknown",
+        },
     })
+}
+
+fn source_state_to_json(state: &pulse::def::SourceState) -> Value {
+    Value::String(match state {
+        pulse::def::SourceState::Invalid => "INVALID",
+        pulse::def::SourceState::Running => "RUNNING",
+        pulse::def::SourceState::Idle => "IDLE",
+        pulse::def::SourceState::Suspended => "SUSPENDED",
+    }.to_owned())
 }
 
 fn source_to_json(source: &SourceInfo) -> Value {
     json!({
         "index": source.index,
+        "state": source_state_to_json(&source.state),
         "name": source.name,
         "description": source.description,
+        "driver": source.driver,
         "sample_specification": &source.sample_spec.print(),
         "channel_map": channel_map_to_json(&source.channel_map),
         "owner_module": source.owner_module,
-        "volume": volume_to_json(&source.volume, &source.channel_map),
         "mute": source.mute,
-        "monitor_of_sink": source.monitor_of_sink,
-        "monitor_of_sink_name": source.monitor_of_sink_name,
+        "volume": volume_to_json(&source.volume, &source.channel_map),
+        "balance": (source.volume.get_balance(&source.channel_map) as f64 * 100.0).round() / 100.0,
+        "base_volume": {
+            "value": source.base_volume.0,
+            "value_percent": Value::String(source.base_volume.print().trim().to_owned()),
+            "db": Value::String(source.base_volume.print_db()),
+        },
+        "monitor_source": source.monitor_of_sink_name,
+        "latency": {
+            "actual": source.latency.0 as f64,
+            "configured": source.configured_latency.0 as f64,
+        },
+        "flags": source.flags.iter_names().map(|(name, _)| Value::String(name.to_owned())).collect::<Vec<_>>(),
         "properties": proplist_to_json(&source.proplist),
         "ports": source.ports.iter().map(source_port_info_to_json).collect::<Vec<_>>(),
-        "active_port": source.active_port.as_deref().map(source_port_info_to_json),
+        "active_port": source.active_port.as_deref().and_then(|p| p.name.as_deref()).map(|s| Value::String(s.to_owned())),
+        "formats": source.formats.iter().map(|f| Value::String(format!("{:?}", f.get_encoding()).to_lowercase())).collect::<Vec<_>>(),
         "n_volume_steps": source.n_volume_steps,
         "card": source.card,
     })
