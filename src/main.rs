@@ -59,7 +59,7 @@ fn main() {
 
         // ── event loop ────────────────────────────────────────────────
         loop {
-            match mainloop.borrow_mut().iterate(false) {
+            match mainloop.borrow_mut().iterate(true) {
                 IterateResult::Quit(_) | IterateResult::Err(_) => return,
                 IterateResult::Success(_) => {}
             }

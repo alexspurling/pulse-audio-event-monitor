@@ -919,6 +919,23 @@ impl PulseEventListener {
         });
     }
 
+    // ── facility removal ───────────────────────────────────────────
+
+    fn remove_facility(self: &Rc<Self>, facility: Option<Facility>, idx: u32) {
+        let mut state = self.state.borrow_mut();
+        match facility {
+            Some(Facility::Sink) => { state.sinks.remove(&idx); }
+            Some(Facility::Source) => { state.sources.remove(&idx); }
+            Some(Facility::SinkInput) => { state.sink_inputs.remove(&idx); }
+            Some(Facility::SourceOutput) => { state.source_outputs.remove(&idx); }
+            Some(Facility::Module) => { state.modules.remove(&idx); }
+            Some(Facility::Client) => { state.clients.remove(&idx); }
+            Some(Facility::SampleCache) => { state.samples.remove(&idx); }
+            Some(Facility::Card) => { state.cards.remove(&idx); }
+            _ => {}
+        }
+    }
+
     // ── pending-counter management ──────────────────────────────────
 
     /// Decrement the pending counter.  When it reaches zero the
@@ -974,6 +991,7 @@ impl PulseEventListener {
                 }
                 Some(Operation::Removed) => {
                     println!(r#"{{"index":{},"event":"remove","on":"{}"}}"#, idx, f);
+                    this_cb.remove_facility(facility, idx);
                 }
                 None => {}
             }
