@@ -7,6 +7,7 @@ use std::rc::Rc;
 use libpulse_binding::def::SinkState;
 use libpulse_binding::format::Info;
 use libpulse_binding::volume::ChannelVolumes;
+use std::collections::hash_map::Entry;
 
 use libpulse_binding as pulse;
 use pulse::callbacks::ListResult;
@@ -31,15 +32,6 @@ fn facility_name(f: Facility) -> &'static str {
         Facility::SampleCache => "sample-cache",
         Facility::Server => "server",
         Facility::Card => "card",
-    }
-}
-
-/// Human-readable name for a PulseAudio subscription event type.
-fn operation_name(o: Operation) -> &'static str {
-    match o {
-        Operation::New => "new",
-        Operation::Changed => "change",
-        Operation::Removed => "remove",
     }
 }
 
@@ -95,21 +87,24 @@ impl PulseAudioState {
         println!("{}", output);
     }
 
+    pub fn facility_to_json(&self, facility: Facility, idx: u32) -> Option<Value> {
+        match facility {
+            Facility::Sink => self.sinks.get(&idx).map(sink_to_json),
+            Facility::Source => self.sources.get(&idx).map(source_to_json),
+            Facility::SinkInput => self.sink_inputs.get(&idx).map(sink_input_to_json),
+            Facility::SourceOutput => self.source_outputs.get(&idx).map(source_output_to_json),
+            Facility::Module => self.modules.get(&idx).map(module_to_json),
+            Facility::Client => self.clients.get(&idx).map(client_to_json),
+            Facility::SampleCache => self.samples.get(&idx).map(sample_to_json),
+            Facility::Card => self.cards.get(&idx).map(card_to_json),
+            _ => None,
+        }
+    }
+
     /// Print only the data for a single facility item at the given index as a JSON object.
     pub fn print_facility(&self, facility: Facility, idx: u32) {
-        let result = match facility {
-            Facility::Sink => self.sinks.get(&idx).map(|v| sink_to_json(v)),
-            Facility::Source => self.sources.get(&idx).map(|v| source_to_json(v)),
-            Facility::SinkInput => self.sink_inputs.get(&idx).map(|v| sink_input_to_json(v)),
-            Facility::SourceOutput => self.source_outputs.get(&idx).map(|v| source_output_to_json(v)),
-            Facility::Module => self.modules.get(&idx).map(|v| module_to_json(v)),
-            Facility::Client => self.clients.get(&idx).map(|v| client_to_json(v)),
-            Facility::SampleCache => self.samples.get(&idx).map(|v| sample_to_json(v)),
-            Facility::Card => self.cards.get(&idx).map(|v| card_to_json(v)),
-            _ => None,
-        };
         let facility_name = facility_name(facility);
-        let Some(item_json) = result else { return };
+        let Some(item_json) = self.facility_to_json(facility, idx) else { return };
         let mut root = serde_json::Map::new();
         root.insert("index".into(), Value::from(idx));
         root.insert("event".into(), Value::from("new"));
@@ -118,6 +113,75 @@ impl PulseAudioState {
         let output = serde_json::to_string_pretty(&Value::Object(root))
             .unwrap_or_else(|_| "{}".to_string());
         println!("{}", output);
+    }
+
+    pub fn print_facility_diff(&self, facility: Facility, idx: u32, old_json: &Value) {
+        let facility_name = facility_name(facility);
+        let Some(new_json) = self.facility_to_json(facility, idx) else { return };
+        diff_json(old_json, &new_json, "", &facility_name, idx);
+    }
+}
+
+fn print_prop_diff(old_str: &str, new_str: &str, prefix: &str, facility: &str, idx: u32) {
+    println!(r#"{{"index":{},"event":"change","facility":"{}","prop":"{}","old":{},"new":{}}}"#, idx, facility, prefix, old_str, new_str);
+}
+
+/// Compare an optional pair of values and either recurse into `diff_json` (both present)
+/// or print a change line for an added/removed property.
+fn diff_val_pair(old_val: Option<&Value>, new_val: Option<&Value>, prefix: &str, facility: &str, idx: u32) {
+    match (old_val, new_val) {
+        (Some(ov), Some(nv)) => diff_json(ov, nv, prefix, facility, idx),
+        (Some(ov), None) => {
+            let old_str = serde_json::to_string(ov).unwrap_or_default();
+            print_prop_diff(&old_str, "null", prefix, facility, idx);
+        }
+        (None, Some(nv)) => {
+            let new_str = serde_json::to_string(nv).unwrap_or_default();
+            print_prop_diff("null", &new_str, prefix, facility, idx);
+        }
+        (None, None) => {}
+    }
+}
+
+fn diff_json(old: &Value, new: &Value, prefix: &str, facility: &str, idx: u32) {
+    match (old, new) {
+        (Value::Object(old_map), Value::Object(new_map)) => {
+            let mut keys: Vec<&str> = Vec::new();
+            for k in old_map.keys() {
+                keys.push(k.as_str());
+            }
+            for k in new_map.keys() {
+                if !keys.contains(&k.as_str()) {
+                    keys.push(k.as_str());
+                }
+            }
+            for key in keys {
+                let sub_prefix = if prefix.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{}.{}", prefix, key)
+                };
+                let old_val = old_map.get(key);
+                let new_val = new_map.get(key);
+                diff_val_pair(old_val, new_val, &sub_prefix, facility, idx);
+            }
+        }
+        (Value::Array(old_arr), Value::Array(new_arr)) => {
+            let max_len = old_arr.len().max(new_arr.len());
+            for i in 0..max_len {
+                let sub_prefix = format!("{}[{}]", prefix, i);
+                let old_val = old_arr.get(i);
+                let new_val = new_arr.get(i);
+                diff_val_pair(old_val, new_val, &sub_prefix, facility, idx);
+            }
+        }
+        _ => {
+            if old != new {
+                let old_str = serde_json::to_string(old).unwrap_or_default();
+                let new_str = serde_json::to_string(new).unwrap_or_default();
+                print_prop_diff(&old_str, &new_str, prefix, facility, idx);
+            }
+        }
     }
 }
 
@@ -693,9 +757,20 @@ impl PulseEventListener {
         let _op = introspector.get_sink_info_by_index(idx, move |result: ListResult<&SinkInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().sinks.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::Sink, idx);
+                let mut state = this.state.borrow_mut();
+                match state.sinks.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::Sink, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = sink_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::Sink, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -706,9 +781,20 @@ impl PulseEventListener {
         let _op = introspector.get_sink_input_info(idx, move |result: ListResult<&SinkInputInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().sink_inputs.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::SinkInput, idx);
+                let mut state = this.state.borrow_mut();
+                match state.sink_inputs.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::SinkInput, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = sink_input_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::SinkInput, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -719,9 +805,20 @@ impl PulseEventListener {
         let _op = introspector.get_source_info_by_index(idx, move |result: ListResult<&SourceInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().sources.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::Source, idx);
+                let mut state = this.state.borrow_mut();
+                match state.sources.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::Source, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = source_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::Source, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -732,9 +829,20 @@ impl PulseEventListener {
         let _op = introspector.get_module_info(idx, move |result: ListResult<&ModuleInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().modules.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::Module, idx);
+                let mut state = this.state.borrow_mut();
+                match state.modules.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::Module, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = module_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::Module, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -745,9 +853,20 @@ impl PulseEventListener {
         let _op = introspector.get_client_info(idx, move |result: ListResult<&ClientInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().clients.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::Client, idx);
+                let mut state = this.state.borrow_mut();
+                match state.clients.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::Client, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = client_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::Client, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -758,9 +877,20 @@ impl PulseEventListener {
         let _op = introspector.get_card_info_by_index(idx, move |result: ListResult<&CardInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().cards.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::Card, idx);
+                let mut state = this.state.borrow_mut();
+                match state.cards.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::Card, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = card_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::Card, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -771,9 +901,20 @@ impl PulseEventListener {
         let _op = introspector.get_sample_info_by_index(idx, move |result: ListResult<&SampleInfo>| {
             if let ListResult::Item(info) = result {
                 let owned = info.to_owned();
-                this.state.borrow_mut().samples.insert(owned.index, owned);
-            } else if let ListResult::End = result {
-                this.state.borrow().print_facility(Facility::SampleCache, idx);
+                let mut state = this.state.borrow_mut();
+                match state.samples.entry(owned.index) {
+                    Entry::Vacant(v) => {
+                        v.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility(Facility::SampleCache, idx);
+                    }
+                    Entry::Occupied(mut o) => {
+                        let old_json = sample_to_json(o.get());
+                        o.insert(owned);
+                        drop(state);
+                        this.state.borrow().print_facility_diff(Facility::SampleCache, idx, &old_json);
+                    }
+                }
             }
         });
     }
@@ -815,13 +956,9 @@ impl PulseEventListener {
         let this = Rc::clone(this);
         Box::new(move |facility, operation, idx| {
             let f = facility.map(facility_name).unwrap_or("unknown");
-            let o = operation.map(operation_name).unwrap_or("unknown");
+            let this_cb = Rc::clone(&this);
             match operation {
-                Some(Operation::Removed) => {
-                    println!(r#"{{"index":{},"event":"remove","on":"{}"}}"#, idx, f);
-                }
-                Some(Operation::New) => {
-                    let this_cb = Rc::clone(&this);
+                Some(Operation::New) | Some(Operation::Changed) => {
                     match facility {
                         Some(Facility::Sink) => this_cb.fetch_sink_by_index(idx),
                         Some(Facility::Source) => this_cb.fetch_source_by_index(idx),
@@ -835,9 +972,10 @@ impl PulseEventListener {
                         None => {}
                     }
                 }
-                _ => {
-                    println!("[{}] {} idx={}", o, f, idx);
+                Some(Operation::Removed) => {
+                    println!(r#"{{"index":{},"event":"remove","on":"{}"}}"#, idx, f);
                 }
+                None => {}
             }
         })
     }
