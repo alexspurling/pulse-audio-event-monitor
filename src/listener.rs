@@ -77,7 +77,7 @@ impl PulseAudioState {
     }
 
     /// Print the complete state as a JSON object to stdout.
-    pub fn print(&self) {
+    pub fn print_full_state(&self) {
         let mut root = Map::new();
 
         root.insert("modules".into(), map_to_json(&self.modules, module_to_json));
@@ -90,6 +90,31 @@ impl PulseAudioState {
         root.insert("cards".into(), map_to_json(&self.cards, card_to_json));
         root.insert("server".into(), server_to_json(self.server.as_ref()));
 
+        let output = serde_json::to_string_pretty(&Value::Object(root))
+            .unwrap_or_else(|_| "{}".to_string());
+        println!("{}", output);
+    }
+
+    /// Print only the data for a single facility item at the given index as a JSON object.
+    pub fn print_facility(&self, facility: Facility, idx: u32) {
+        let result = match facility {
+            Facility::Sink => self.sinks.get(&idx).map(|v| sink_to_json(v)),
+            Facility::Source => self.sources.get(&idx).map(|v| source_to_json(v)),
+            Facility::SinkInput => self.sink_inputs.get(&idx).map(|v| sink_input_to_json(v)),
+            Facility::SourceOutput => self.source_outputs.get(&idx).map(|v| source_output_to_json(v)),
+            Facility::Module => self.modules.get(&idx).map(|v| module_to_json(v)),
+            Facility::Client => self.clients.get(&idx).map(|v| client_to_json(v)),
+            Facility::SampleCache => self.samples.get(&idx).map(|v| sample_to_json(v)),
+            Facility::Card => self.cards.get(&idx).map(|v| card_to_json(v)),
+            _ => None,
+        };
+        let facility_name = facility_name(facility);
+        let Some(item_json) = result else { return };
+        let mut root = serde_json::Map::new();
+        root.insert("index".into(), Value::from(idx));
+        root.insert("event".into(), Value::from("new"));
+        root.insert("facility".into(), Value::String(facility_name.to_owned()));
+        root.insert("data".into(), item_json);
         let output = serde_json::to_string_pretty(&Value::Object(root))
             .unwrap_or_else(|_| "{}".to_string());
         println!("{}", output);
@@ -195,6 +220,23 @@ fn sink_port_info_to_json(p: &SinkPortInfo) -> Value {
     })
 }
 
+fn card_port_info_to_json(p: &CardPortInfo) -> Value {
+    json!({
+        "description": p.description,
+        "type": format!("{:?}", p.r#type),
+        "priority": p.priority,
+        "latency_offset": format!("{} usec", p.latency_offset),
+        "availability_group": p.availability_group.as_deref().unwrap_or(""),
+        "availability": match p.available {
+            pulse::def::PortAvailable::Yes => "available",
+            pulse::def::PortAvailable::No => "not available",
+            _ => "unknown",
+        },
+        "properties": proplist_to_json(&p.proplist),
+        "profiles": p.profiles.iter().map(|pr| pr.name.clone().map(|n| Value::String(n.into_owned())).unwrap_or(Value::Null)).collect::<Vec<_>>(),
+    })
+}
+
 fn card_to_json(card: &CardInfo) -> Value {
     json!({
         "index": card.index,
@@ -246,26 +288,18 @@ fn sink_to_json(sink: &SinkInfo) -> Value {
         "ports": sink.ports.iter().map(sink_port_info_to_json).collect::<Vec<_>>(),
         "active_port": sink.active_port.as_deref().and_then(|p| p.name.as_deref()).map(|s| Value::String(s.to_owned())),
         "formats": sink.formats.iter().map(|f| Value::String(format!("{:?}", f.get_encoding()).to_lowercase())).collect::<Vec<_>>(),
-        "volume_steps": sink.n_volume_steps,
+        "n_volume_steps": sink.n_volume_steps,
         "card": sink.card,
     })
 }
 
-fn card_port_info_to_json(p: &CardPortInfo) -> Value {
-    json!({
-        "description": p.description,
-        "type": format!("{:?}", p.r#type),
-        "priority": p.priority,
-        "latency_offset": format!("{} usec", p.latency_offset),
-        "availability_group": p.availability_group.as_deref().unwrap_or(""),
-        "availability": match p.available {
-            pulse::def::PortAvailable::Yes => "available",
-            pulse::def::PortAvailable::No => "not available",
-            _ => "unknown",
-        },
-        "properties": proplist_to_json(&p.proplist),
-        "profiles": p.profiles.iter().map(|pr| pr.name.clone().map(|n| Value::String(n.into_owned())).unwrap_or(Value::Null)).collect::<Vec<_>>(),
-    })
+fn source_state_to_json(state: &pulse::def::SourceState) -> Value {
+    Value::String(match state {
+        pulse::def::SourceState::Invalid => "INVALID",
+        pulse::def::SourceState::Running => "RUNNING",
+        pulse::def::SourceState::Idle => "IDLE",
+        pulse::def::SourceState::Suspended => "SUSPENDED",
+    }.to_owned())
 }
 
 // ── SourceInfo ──────────────────────────────────────────────────────
@@ -283,15 +317,6 @@ fn source_port_info_to_json(p: &SourcePortInfo) -> Value {
             _ => "unknown",
         },
     })
-}
-
-fn source_state_to_json(state: &pulse::def::SourceState) -> Value {
-    Value::String(match state {
-        pulse::def::SourceState::Invalid => "INVALID",
-        pulse::def::SourceState::Running => "RUNNING",
-        pulse::def::SourceState::Idle => "IDLE",
-        pulse::def::SourceState::Suspended => "SUSPENDED",
-    }.to_owned())
 }
 
 fn source_to_json(source: &SourceInfo) -> Value {
@@ -386,8 +411,9 @@ fn module_to_json(m: &ModuleInfo) -> Value {
 fn client_to_json(c: &ClientInfo) -> Value {
     json!({
         "index": c.index,
-        "driver": c.driver,
+        "name": c.name,
         "owner_module": c.owner_module,
+        "driver": c.driver,
         "properties": proplist_to_json(&c.proplist),
     })
 }
@@ -492,7 +518,7 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
                 ListResult::Error => {
-                    eprintln!("fetch_all: card list error");
+                    eprintln!("fetch: card list error");
                     this.signal_eol();
                 }
             }
@@ -513,7 +539,7 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
                 ListResult::Error => {
-                    eprintln!("fetch_all: sink list error");
+                    eprintln!("fetch: sink list error");
                     this.signal_eol();
                 }
             }
@@ -534,7 +560,7 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
                 ListResult::Error => {
-                    eprintln!("fetch_all: source list error");
+                    eprintln!("fetch: source list error");
                     this.signal_eol();
                 }
             }
@@ -545,45 +571,42 @@ impl PulseEventListener {
         self.pending.set(self.pending.get() + 1);
         let this = Rc::clone(self);
         let introspector = self.context.borrow().introspect();
-        let _op =
-            introspector.get_sink_input_info_list(move |result: ListResult<&SinkInputInfo>| {
-                match result {
-                    ListResult::Item(info) => {
-                        let owned = info.to_owned();
-                        this.state.borrow_mut().sink_inputs.insert(owned.index, owned);
-                    }
-                    ListResult::End => {
-                        this.signal_eol();
-                    }
-                    ListResult::Error => {
-                        eprintln!("fetch_all: sink-input list error");
-                        this.signal_eol();
-                    }
+        let _op = introspector.get_sink_input_info_list(move |result: ListResult<&SinkInputInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().sink_inputs.insert(owned.index, owned);
                 }
-            });
+                ListResult::End => {
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch: sink-input list error");
+                    this.signal_eol();
+                }
+            }
+        });
     }
 
     fn fetch_source_outputs(self: &Rc<Self>) {
         self.pending.set(self.pending.get() + 1);
         let this = Rc::clone(self);
         let introspector = self.context.borrow().introspect();
-        let _op = introspector.get_source_output_info_list(
-            move |result: ListResult<&SourceOutputInfo>| {
-                match result {
-                    ListResult::Item(info) => {
-                        let owned = info.to_owned();
-                        this.state.borrow_mut().source_outputs.insert(owned.index, owned);
-                    }
-                    ListResult::End => {
-                        this.signal_eol();
-                    }
-                    ListResult::Error => {
-                        eprintln!("fetch_all: source-output list error");
-                        this.signal_eol();
-                    }
+        let _op = introspector.get_source_output_info_list(move |result: ListResult<&SourceOutputInfo>| {
+            match result {
+                ListResult::Item(info) => {
+                    let owned = info.to_owned();
+                    this.state.borrow_mut().source_outputs.insert(owned.index, owned);
                 }
-            },
-        );
+                ListResult::End => {
+                    this.signal_eol();
+                }
+                ListResult::Error => {
+                    eprintln!("fetch: source-output list error");
+                    this.signal_eol();
+                }
+            }
+        });
     }
 
     fn fetch_modules(self: &Rc<Self>) {
@@ -600,7 +623,7 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
                 ListResult::Error => {
-                    eprintln!("fetch_all: module list error");
+                    eprintln!("fetch: module list error");
                     this.signal_eol();
                 }
             }
@@ -621,7 +644,7 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
                 ListResult::Error => {
-                    eprintln!("fetch_all: client list error");
+                    eprintln!("fetch: client list error");
                     this.signal_eol();
                 }
             }
@@ -642,7 +665,7 @@ impl PulseEventListener {
                     this.signal_eol();
                 }
                 ListResult::Error => {
-                    eprintln!("fetch_all: sample list error");
+                    eprintln!("fetch: sample list error");
                     this.signal_eol();
                 }
             }
@@ -659,6 +682,99 @@ impl PulseEventListener {
             let owned = server_info.to_owned();
             this.state.borrow_mut().server = Some(owned);
             this.signal_eol();
+        });
+    }
+
+    // ── per-entity fetches (by-index) ────────────────────────────────
+
+    fn fetch_sink_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_sink_info_by_index(idx, move |result: ListResult<&SinkInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().sinks.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::Sink, idx);
+            }
+        });
+    }
+
+    fn fetch_sink_input_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_sink_input_info(idx, move |result: ListResult<&SinkInputInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().sink_inputs.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::SinkInput, idx);
+            }
+        });
+    }
+
+    fn fetch_source_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_source_info_by_index(idx, move |result: ListResult<&SourceInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().sources.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::Source, idx);
+            }
+        });
+    }
+
+    fn fetch_module_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_module_info(idx, move |result: ListResult<&ModuleInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().modules.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::Module, idx);
+            }
+        });
+    }
+
+    fn fetch_client_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_client_info(idx, move |result: ListResult<&ClientInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().clients.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::Client, idx);
+            }
+        });
+    }
+
+    fn fetch_card_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_card_info_by_index(idx, move |result: ListResult<&CardInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().cards.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::Card, idx);
+            }
+        });
+    }
+
+    fn fetch_sample_by_index(self: &Rc<Self>, idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_sample_info_by_index(idx, move |result: ListResult<&SampleInfo>| {
+            if let ListResult::Item(info) = result {
+                let owned = info.to_owned();
+                this.state.borrow_mut().samples.insert(owned.index, owned);
+            } else if let ListResult::End = result {
+                this.state.borrow().print_facility(Facility::SampleCache, idx);
+            }
         });
     }
 
@@ -679,27 +795,50 @@ impl PulseEventListener {
     // ── subscription ────────────────────────────────────────────────
 
     /// Subscribe to all PulseAudio event types and install the event callback.
-    pub fn subscribe(&self) {
+    pub fn subscribe(self: &Rc<Self>) {
         self.context
             .borrow_mut()
             .subscribe(InterestMaskSet::all(), |_success| {});
 
         self.context
             .borrow_mut()
-            .set_subscribe_callback(Some(Self::make_callback()));
+            .set_subscribe_callback(Some(Self::make_event_callback(self)));
     }
 
     /// Print the current state as JSON to stdout.
     pub fn print_state(&self) {
-        self.state.borrow().print();
+        self.state.borrow().print_full_state();
     }
 
     /// Factory – produces the boxed event callback.
-    fn make_callback() -> Box<dyn FnMut(Option<Facility>, Option<Operation>, u32)> {
-        Box::new(|facility, operation, idx| {
+    fn make_event_callback(this: &Rc<Self>) -> Box<dyn FnMut(Option<Facility>, Option<Operation>, u32)> {
+        let this = Rc::clone(this);
+        Box::new(move |facility, operation, idx| {
             let f = facility.map(facility_name).unwrap_or("unknown");
             let o = operation.map(operation_name).unwrap_or("unknown");
-            println!("[{}] {} idx={}", o, f, idx);
+            match operation {
+                Some(Operation::Removed) => {
+                    println!(r#"{{"index":{},"event":"remove","on":"{}"}}"#, idx, f);
+                }
+                Some(Operation::New) => {
+                    let this_cb = Rc::clone(&this);
+                    match facility {
+                        Some(Facility::Sink) => this_cb.fetch_sink_by_index(idx),
+                        Some(Facility::Source) => this_cb.fetch_source_by_index(idx),
+                        Some(Facility::SinkInput) => this_cb.fetch_sink_input_by_index(idx),
+                        Some(Facility::SourceOutput) => this_cb.fetch_source_by_index(idx),
+                        Some(Facility::Module) => this_cb.fetch_module_by_index(idx),
+                        Some(Facility::Client) => this_cb.fetch_client_by_index(idx),
+                        Some(Facility::SampleCache) => this_cb.fetch_sample_by_index(idx),
+                        Some(Facility::Card) => this_cb.fetch_card_by_index(idx),
+                        Some(Facility::Server) => this_cb.fetch_server(),
+                        None => {}
+                    }
+                }
+                _ => {
+                    println!("[{}] {} idx={}", o, f, idx);
+                }
+            }
         })
     }
 }
