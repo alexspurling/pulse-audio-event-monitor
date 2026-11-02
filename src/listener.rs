@@ -718,6 +718,7 @@ impl PulseEventListener {
 
     // ── per-entity fetches (single-value) ───────────────────────────
 
+    /// Initial state fetch — stores the server info without diffing.
     fn fetch_server(self: &Rc<Self>) {
         self.pending.set(self.pending.get() + 1);
         let this = Rc::clone(self);
@@ -726,6 +727,30 @@ impl PulseEventListener {
             let owned = server_info.to_owned();
             this.state.borrow_mut().server = Some(owned);
             this.signal_eol();
+        });
+    }
+
+    /// Subscription-event fetch — follows the same Vacant / Occupied
+    /// pattern as the other fetch_*_by_index methods.
+    fn fetch_server_by_index(self: &Rc<Self>, _idx: u32) {
+        let this = Rc::clone(self);
+        let introspector = self.context.borrow().introspect();
+        let _op = introspector.get_server_info(move |server_info: &ServerInfo| {
+            let owned = server_info.to_owned();
+            let mut state = this.state.borrow_mut();
+            // Simulate the Vacant/Occupied pattern on the Option
+            let old = state.server.replace(owned);
+            if old.is_some() {
+                let old_json = server_to_json(old.as_ref().unwrap());
+                drop(state);
+                let new_json = this.state.borrow().facility_to_json(Facility::Server, _idx);
+                if let Some(nj) = new_json {
+                    diff_json(&old_json, &nj, "", "server", _idx);
+                }
+            } else {
+                drop(state);
+                this.state.borrow().print_facility(Facility::Server, _idx);
+            }
         });
     }
 
@@ -965,7 +990,7 @@ impl PulseEventListener {
                         Some(Facility::Client) => this_cb.fetch_client_by_index(idx),
                         Some(Facility::SampleCache) => this_cb.fetch_sample_by_index(idx),
                         Some(Facility::Card) => this_cb.fetch_card_by_index(idx),
-                        Some(Facility::Server) => this_cb.fetch_server(),
+                        Some(Facility::Server) => this_cb.fetch_server_by_index(idx),
                         None => {}
                     }
                 }
