@@ -68,23 +68,17 @@ impl PulseAudioState {
         }
     }
 
-    /// Print the complete state as a JSON object to stdout.
+    /// Print every entity as an individual JSON line to stdout.
     pub fn print_full_state(&self) {
-        let mut root = Map::new();
-
-        root.insert("modules".into(), map_to_json(&self.modules, module_to_json));
-        root.insert("sinks".into(), map_to_json(&self.sinks, sink_to_json));
-        root.insert("sources".into(), map_to_json(&self.sources, source_to_json));
-        root.insert("sink_inputs".into(), map_to_json(&self.sink_inputs, sink_input_to_json));
-        root.insert("source_outputs".into(), map_to_json(&self.source_outputs, source_output_to_json));
-        root.insert("clients".into(), map_to_json(&self.clients, client_to_json));
-        root.insert("samples".into(), map_to_json(&self.samples, sample_to_json));
-        root.insert("cards".into(), map_to_json(&self.cards, card_to_json));
-        root.insert("server".into(), server_to_json(self.server.as_ref()));
-
-        let output = serde_json::to_string_pretty(&Value::Object(root))
-            .unwrap_or_else(|_| "{}".to_string());
-        println!("{}", output);
+        for idx in self.cards.keys() { self.print_facility(Facility::Card, *idx); }
+        for idx in self.sinks.keys() { self.print_facility(Facility::Sink, *idx); }
+        for idx in self.sources.keys() { self.print_facility(Facility::Source, *idx); }
+        for idx in self.sink_inputs.keys() { self.print_facility(Facility::SinkInput, *idx); }
+        for idx in self.source_outputs.keys() { self.print_facility(Facility::SourceOutput, *idx); }
+        for idx in self.modules.keys() { self.print_facility(Facility::Module, *idx); }
+        for idx in self.clients.keys() { self.print_facility(Facility::Client, *idx); }
+        for idx in self.samples.keys() { self.print_facility(Facility::SampleCache, *idx); }
+        if self.server.is_some() { self.print_facility(Facility::Server, 0); }
     }
 
     pub fn facility_to_json(&self, facility: Facility, idx: u32) -> Option<Value> {
@@ -97,7 +91,7 @@ impl PulseAudioState {
             Facility::Client => self.clients.get(&idx).map(client_to_json),
             Facility::SampleCache => self.samples.get(&idx).map(sample_to_json),
             Facility::Card => self.cards.get(&idx).map(card_to_json),
-            _ => None,
+            Facility::Server => self.server.as_ref().map(server_to_json),
         }
     }
 
@@ -110,7 +104,7 @@ impl PulseAudioState {
         root.insert("event".into(), Value::from("new"));
         root.insert("facility".into(), Value::String(facility_name.to_owned()));
         root.insert("data".into(), item_json);
-        let output = serde_json::to_string_pretty(&Value::Object(root))
+        let output = serde_json::to_string(&Value::Object(root))
             .unwrap_or_else(|_| "{}".to_string());
         println!("{}", output);
     }
@@ -218,17 +212,6 @@ fn channel_position_to_str(pos: &pulse::channelmap::Position) -> String {
 /// Convert a PulseAudio channel map into a JSON comma-separated string of hyphen-separated position names.
 fn channel_map_to_json(cm: &pulse::channelmap::Map) -> Value {
     Value::String(cm.get().iter().map(channel_position_to_str).collect::<Vec<_>>().join(","))
-}
-
-/// Convert a HashMap of index→entity into a JSON array of entity objects (sorted by index).
-fn map_to_json<T>(map: &HashMap<u32, T>, to_val: fn(&T) -> Value) -> Value {
-    let mut items: Vec<Value> = map.iter().map(|(_idx, entity)| to_val(entity)).collect();
-    items.sort_by(|a, b| {
-        let ia = a.get("index").and_then(Value::as_u64).unwrap_or(0);
-        let ib = b.get("index").and_then(Value::as_u64).unwrap_or(0);
-        ia.cmp(&ib)
-    });
-    Value::Array(items)
 }
 
 /// Convert channel volumes paired with a channel map into a JSON object keyed by position name.
@@ -500,21 +483,18 @@ fn sample_to_json(s: &SampleInfo) -> Value {
 
 // ── ServerInfo ──────────────────────────────────────────────────────
 
-fn server_to_json(s: Option<&ServerInfo>) -> Value {
-    match s {
-        Some(info) => json!({
-            "user_name": info.user_name,
-            "host_name": info.host_name,
-            "server_version": info.server_version,
-            "server_name": info.server_name,
-            "sample_specification": info.sample_spec.print(),
-            "default_sink_name": info.default_sink_name,
-            "default_source_name": info.default_source_name,
-            "cookie": info.cookie,
-            "channel_map": channel_map_to_json(&info.channel_map),
-        }),
-        None => Value::Null,
-    }
+fn server_to_json(s: &ServerInfo) -> Value {
+    json!({
+        "user_name": s.user_name,
+        "host_name": s.host_name,
+        "server_version": s.server_version,
+        "server_name": s.server_name,
+        "sample_specification": s.sample_spec.print(),
+        "default_sink_name": s.default_sink_name,
+        "default_source_name": s.default_source_name,
+        "cookie": s.cookie,
+        "channel_map": channel_map_to_json(&s.channel_map),
+    })
 }
 
 /// Manages PulseAudio event subscription and callback dispatch.
