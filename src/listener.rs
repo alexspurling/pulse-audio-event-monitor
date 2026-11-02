@@ -292,7 +292,7 @@ fn card_to_json(card: &CardInfo) -> Value {
         "owner_module": card.owner_module,
         "properties": proplist_to_json(&card.proplist),
         "profiles": card.profiles.iter().map(|p| (p.name.clone().unwrap_or_default().into_owned(), card_profile_info_to_json(p))).collect::<serde_json::Map<_, _>>(),
-        "active_profile": card.active_profile.as_ref().and_then(|ap| ap.name.as_deref()).map(|s| Value::String(s.to_owned())),
+        "active_profile": card.active_profile.as_ref().map(|ap| json!({"name": ap.name.as_deref().unwrap_or(""), "description": ap.description})),
         "ports": card.ports.iter().map(|p| (p.name.clone().unwrap_or_default().into_owned(), card_port_info_to_json(p))).collect::<serde_json::Map<_, _>>(),
     })
 }
