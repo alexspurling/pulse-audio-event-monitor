@@ -995,7 +995,7 @@ impl PulseEventListener {
                     }
                 }
                 Some(Operation::Removed) => {
-                    println!(r#"{{"index":{},"event":"remove","on":"{}"}}"#, idx, f);
+                    println!(r#"{{"index":{},"event":"remove","facility":"{}"}}"#, idx, f);
                     this_cb.remove_facility(facility, idx);
                 }
                 None => {}
