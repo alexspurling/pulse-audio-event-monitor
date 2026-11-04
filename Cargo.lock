@@ -102,8 +102,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "paeventmonrust"
-version = "0.1.0"
+name = "paeventmon"
+version = "1.0.0"
 dependencies = [
  "libc",
  "libpulse-binding",
