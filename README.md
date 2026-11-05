@@ -1,4 +1,4 @@
-This tool is a wrapper around the PulseAudio streaming API designed to support applications that need
+`paeventmon` is a tool that wraps the PulseAudio streaming API designed to support applications that need
 a view on the system's audio state but which cannot call the pulseaudio API directly.
 
 ![Example client application (a desklet for selecting the current audio output device)](headsetmon.png)
